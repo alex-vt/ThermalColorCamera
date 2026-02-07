@@ -1,0 +1,3 @@
+# TC001 / 0bda:5830
+# Trigger once (interface index 0); launcher prepares a hardened runtime unit.
+ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", ATTR{index}=="0", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5830", TAG+="systemd", ENV{SYSTEMD_WANTS}+="tc001-color-camera-launch@%n.service"

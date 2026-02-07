@@ -1,0 +1,21 @@
+[Unit]
+Description=TC001 launcher for source video index %i
+BindsTo=dev-video%i.device
+After=dev-video%i.device
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tc001-color-camera-hotplug --src-video-index %i
+ExecStop=/usr/local/bin/tc001-color-camera-hotplug --cleanup-src-video-index %i
+RemainAfterExit=yes
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+LockPersonality=yes
+RestrictRealtime=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
