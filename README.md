@@ -19,6 +19,7 @@ _On the left: raw output, on the right: color output._
 ## Tested on
 
 - Debian 12
+- Debian 13
 
 ## Usage
 
