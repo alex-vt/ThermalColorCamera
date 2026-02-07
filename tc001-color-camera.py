@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from array import array
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 _THERMAL_SHM_DIR = "/dev/shm/sensors/camera/thermal"
 _THERMAL_SHM_FILES = {
@@ -424,10 +424,30 @@ def _colorize_gray_frame(frame: bytes, lut: Sequence[bytes]) -> bytes:
     return bytes(out)
 
 
-def _iter_exact_frames(stream, frame_size: int) -> Iterable[bytes]:
+def _iter_exact_frames(
+    stream,
+    frame_size: int,
+    *,
+    should_stop: Optional[Callable[[], bool]] = None,
+    poll_interval_s: float = 0.25,
+) -> Iterable[bytes]:
+    if frame_size <= 0:
+        raise ValueError("frame_size must be > 0")
+    if poll_interval_s <= 0:
+        raise ValueError("poll_interval_s must be > 0")
+
+    fd = stream.fileno()
     pending = bytearray()
     while True:
-        chunk = stream.read(frame_size - len(pending))
+        if should_stop is not None and should_stop():
+            return
+        try:
+            readable, _, _ = select.select([fd], [], [], poll_interval_s)
+        except InterruptedError:
+            continue
+        if not readable:
+            continue
+        chunk = os.read(fd, frame_size - len(pending))
         if not chunk:
             return
         pending.extend(chunk)
@@ -1261,7 +1281,9 @@ def main(argv: Sequence[str]) -> int:
                 )
                 next_temp_write = now + temps_every
 
-        for buf in _iter_exact_frames(reader.stdout, frame_size):
+        for buf in _iter_exact_frames(
+            reader.stdout, frame_size, should_stop=lambda: stopping
+        ):
             if stopping:
                 break
 
