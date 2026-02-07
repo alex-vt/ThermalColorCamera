@@ -2,6 +2,10 @@
 
 A script that converts the Topdon TC001 thermal camera (0bda:5830) raw gray/green output into a virtual color camera (/dev/video*) for webcam apps on Linux, with NUC/FFC auto-shutter control.
 
+<img src="example_bw.png" width=250/> <img src="example_color.png" width=500/>
+
+_On the left: raw output, on the right: color output._
+
 ## Features
 
 - Auto-detects TC001 by USB VID:PID (`0bda:5830`)
