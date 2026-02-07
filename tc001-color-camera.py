@@ -797,7 +797,7 @@ def main(argv: Sequence[str]) -> int:
         default=None,
         help="TC001 source video index (number only, e.g. 2). If omitted, auto-detects (prefers index 0 when available).",
     )
-    parser.add_argument("--fps", type=int, default=25, help="Capture/output framerate")
+    parser.add_argument("--fps", type=int, default=30, help="Capture/output framerate")
     parser.add_argument(
         "--dst-resolution",
         default="640x480",
@@ -1077,41 +1077,54 @@ def main(argv: Sequence[str]) -> int:
 
         assert reader.stdout is not None
         assert writer.stdin is not None
-        next_temp_write = time.monotonic()
-        if first_buf:
+        frame_period = 1.0 / float(fps)
+        now = time.monotonic()
+        next_output_at = now
+        next_temp_write = now
+        if first_buf and not stopping:
             first_gray = first_buf[:picture_bytes:2]
-            try:
-                writer.stdin.write(_colorize_gray_frame(first_gray, lut))
-            except (BrokenPipeError, OSError) as exc:
-                if not (stopping and isinstance(exc, OSError) and exc.errno == errno.EPIPE):
-                    raise
-                stopping = True
+            if now >= next_output_at:
+                try:
+                    writer.stdin.write(_colorize_gray_frame(first_gray, lut))
+                except (BrokenPipeError, OSError) as exc:
+                    if not (stopping and isinstance(exc, OSError) and exc.errno == errno.EPIPE):
+                        raise
+                    stopping = True
+                now = time.monotonic()
+                while next_output_at <= now:
+                    next_output_at += frame_period
 
-            _try_thermal_telemetry(
-                _update_thermal_stats_from_frame,
-                first_buf,
-                picture_bytes=picture_bytes,
-                width=width,
-                height=height,
-                rotate=args.rotate,
-                out_w=out_w,
-                out_h=out_h,
-            )
-            next_temp_write = time.monotonic() + temps_every
+            if not stopping:
+                _try_thermal_telemetry(
+                    _update_thermal_stats_from_frame,
+                    first_buf,
+                    picture_bytes=picture_bytes,
+                    width=width,
+                    height=height,
+                    rotate=args.rotate,
+                    out_w=out_w,
+                    out_h=out_h,
+                )
+                next_temp_write = now + temps_every
 
         for buf in _iter_exact_frames(reader.stdout, frame_size):
             if stopping:
                 break
-            gray = buf[:picture_bytes:2]
-            try:
-                writer.stdin.write(_colorize_gray_frame(gray, lut))
-            except (BrokenPipeError, OSError) as exc:
-                if not (stopping and isinstance(exc, OSError) and exc.errno == errno.EPIPE):
-                    raise
-                break
 
-            now = time.monotonic()
-            if now >= next_temp_write:
+            loop_now = time.monotonic()
+            if loop_now >= next_output_at:
+                gray = buf[:picture_bytes:2]
+                try:
+                    writer.stdin.write(_colorize_gray_frame(gray, lut))
+                except (BrokenPipeError, OSError) as exc:
+                    if not (stopping and isinstance(exc, OSError) and exc.errno == errno.EPIPE):
+                        raise
+                    break
+                loop_now = time.monotonic()
+                while next_output_at <= loop_now:
+                    next_output_at += frame_period
+
+            if loop_now >= next_temp_write:
                 _try_thermal_telemetry(
                     _update_thermal_stats_from_frame,
                     buf,
@@ -1122,7 +1135,7 @@ def main(argv: Sequence[str]) -> int:
                     out_w=out_w,
                     out_h=out_h,
                 )
-                next_temp_write = now + temps_every
+                next_temp_write = loop_now + temps_every
         else:
             if not stopping:
                 stream_failed = True

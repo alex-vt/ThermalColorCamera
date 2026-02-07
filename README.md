@@ -39,7 +39,7 @@ Then select the `TC001 Color Camera [<id>]` device in your camera app.
 |---|---|
 | `--src-video-index` | Source TC001 device index, e.g. `2` for `/dev/video2` (default: auto-detect) |
 | `--dst-video-index` | Virtual camera device index, e.g. `3` for `/dev/video3` (default: lowest free) |
-| `--fps` | Capture/output FPS (default: `25`, clamped to `1..60`) |
+| `--fps` | Capture/output FPS (default: `30`, clamped to `1..60`) |
 | `--dst-resolution` | Output `WxH` (default: `640x480`, each dimension clamped to `128..2048`) |
 | `--rotate` | `none`, `0`, `90`, `180`, `270` (default: `90`) |
 | `--ffc-disable-after` | Disable TC001 NUC/FFC auto-shutter after N seconds (default: `30`), `none` or no value keeps it enabled |
@@ -114,14 +114,14 @@ sudo systemctl daemon-reload
 
 ## Service args override
 
-To change service arguments (for example `--rotate` or `--dst-resolution`):
+To change service arguments (for example `--rotate`, `--dst-resolution`, or `--fps`):
 
 ```bash
 sudo install -d -m 0755 /etc/systemd/system/tc001-color-camera@.service.d
 cat <<'EOF' | sudo tee /etc/systemd/system/tc001-color-camera@.service.d/override.conf >/dev/null
 [Service]
 ExecStart=
-ExecStart=/usr/local/bin/tc001-color-camera --src-video-index %i $TC001_LAUNCH_ARGS --rotate none --dst-resolution 640x480 --ffc-disable-after 30
+ExecStart=/usr/local/bin/tc001-color-camera --src-video-index %i $TC001_LAUNCH_ARGS --rotate none --dst-resolution 640x480 --fps 3 --ffc-disable-after 30
 EOF
 sudo systemctl daemon-reload
 ```
