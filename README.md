@@ -117,20 +117,12 @@ sudo systemctl daemon-reload
 To change service arguments (for example `--rotate` or `--dst-resolution`):
 
 ```bash
-sudo systemctl edit tc001-color-camera@.service
-```
-
-Example drop-in:
-
-```ini
+sudo install -d -m 0755 /etc/systemd/system/tc001-color-camera@.service.d
+cat <<'EOF' | sudo tee /etc/systemd/system/tc001-color-camera@.service.d/override.conf >/dev/null
 [Service]
 ExecStart=
 ExecStart=/usr/local/bin/tc001-color-camera --src-video-index %i $TC001_LAUNCH_ARGS --rotate none --dst-resolution 640x480 --ffc-disable-after 30
-```
-
-Apply:
-
-```bash
+EOF
 sudo systemctl daemon-reload
 ```
 
