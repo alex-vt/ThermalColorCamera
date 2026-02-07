@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import importlib.util
 import os
 import re
 import shlex
-import subprocess
+import subprocess  # nosec B404: required; calls use argv lists without shell
 import sys
 import time
 from typing import List, Optional, Sequence, Tuple
 
 
 def _load_common_module():
-    common_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tc001-color-camera-common.py")
-    spec = importlib.util.spec_from_file_location("tc001_color_camera_common", common_path)
+    common_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "tc001-color-camera-common.py",
+    )
+    spec = importlib.util.spec_from_file_location(
+        "tc001_color_camera_common", common_path
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Failed to load common module from {common_path}")
     module = importlib.util.module_from_spec(spec)
@@ -90,16 +96,22 @@ def _wait_for_tc001_device_nodes(video_node: str, timeout_s: float = 1.0) -> Non
         for node in nodes:
             video_basename = os.path.basename(node)
             idx_path = f"/sys/class/video4linux/{video_basename}/index"
+            index_value: Optional[str] = None
             try:
-                indices.add(_read_text(idx_path))
+                index_value = _read_text(idx_path)
             except Exception:
+                index_value = None
+            if index_value is None:
                 continue
+            indices.add(index_value)
         if "0" in indices and "1" in indices:
             return
         time.sleep(0.05)
 
 
-def _loopback_state(node_key: Optional[str], connected_keys: set[str], busy: bool) -> Optional[str]:
+def _loopback_state(
+    node_key: Optional[str], connected_keys: set[str], busy: bool
+) -> Optional[str]:
     if node_key is None:
         return None
     if node_key in connected_keys:
@@ -116,7 +128,17 @@ def _create_loopback_device(
     timeout_s: float = 2.5,
 ) -> str:
     dst = f"/dev/video{dst_video_index}"
-    _run([v4l2loopback_ctl, "add", "--name", loopback_name, "--exclusive-caps", "1", str(dst_video_index)])
+    _run(
+        [
+            v4l2loopback_ctl,
+            "add",
+            "--name",
+            loopback_name,
+            "--exclusive-caps",
+            "1",
+            str(dst_video_index),
+        ]
+    )
     deadline = time.monotonic() + timeout_s
     seen_path = False
     while time.monotonic() < deadline:
@@ -128,7 +150,8 @@ def _create_loopback_device(
     _run([v4l2loopback_ctl, "delete", str(dst_video_index)], check=False)
     if seen_path:
         raise RuntimeError(
-            f"Created destination --dst-video-index {dst_video_index} ({dst}) is not a TC001 loopback node"
+            f"Created destination --dst-video-index {dst_video_index} ({dst}) "
+            "is not a TC001 loopback node"
         )
     raise FileNotFoundError(dst)
 
@@ -186,7 +209,7 @@ def _dst_video_index_from_execstart(exec_start: str) -> Optional[int]:
 
 
 def _configured_dst_video_index(systemctl: str, unit_name: str) -> Optional[int]:
-    proc = subprocess.run(
+    proc = subprocess.run(  # nosec B603: fixed command shape, no shell
         [systemctl, "cat", unit_name],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -221,8 +244,10 @@ def _write_runtime_dropin(
     lines: List[str] = [
         "[Service]",
         (
-            f'Environment="TC001_LAUNCH_ARGS=--dst-video-index {dst_video_index} '
-            f'--dst-name-key {dst_name_key} --skip-modprobe --dst-precreated"'
+            'Environment="TC001_LAUNCH_ARGS='
+            f"--dst-video-index {dst_video_index} "
+            f"--dst-name-key {dst_name_key} "
+            '--skip-modprobe --dst-precreated"'
         ),
         "DevicePolicy=closed",
         "DeviceAllow=",
@@ -255,7 +280,8 @@ def _ensure_dst_video_index(
         if existing_key != physical_key:
             raise RuntimeError(
                 (
-                    f"--dst-video-index {dst_video_index} ({dst}) is already allocated to "
+                    f"--dst-video-index {dst_video_index} ({dst}) "
+                    "is already allocated to "
                     f"a different TC001 camera (key={existing_key})"
                 )
             )
@@ -264,7 +290,8 @@ def _ensure_dst_video_index(
     if os.path.exists(dst):
         raise RuntimeError(
             (
-                f"--dst-video-index {dst_video_index} ({dst}) already exists and is not a "
+                f"--dst-video-index {dst_video_index} ({dst}) already "
+                "exists and is not a "
                 "matching TC001 loopback node"
             )
         )
@@ -289,7 +316,9 @@ def _prune_duplicate_loopbacks_for_key(
             continue
         if _video_node_busy(node):
             continue
-        _delete_tc001_loopback_dst_unlocked(v4l2loopback_ctl, idx, expected_key=physical_key)
+        _delete_tc001_loopback_dst_unlocked(
+            v4l2loopback_ctl, idx, expected_key=physical_key
+        )
 
 
 def _runtime_dropin_path(src_video_index: int) -> str:
@@ -335,10 +364,8 @@ def _remove_runtime_dropin(src_video_index: int) -> bool:
         return False
     except Exception:
         return False
-    try:
+    with contextlib.suppress(Exception):
         os.rmdir(dropin_dir)
-    except Exception:
-        pass
     return removed
 
 
@@ -368,7 +395,9 @@ def _reconcile_dst_video_index(v4l2loopback_ctl: str, *, physical_key: str) -> i
                 continue
             if _video_node_busy(node):
                 continue
-            _delete_tc001_loopback_dst_unlocked(v4l2loopback_ctl, idx, expected_key=node_key)
+            _delete_tc001_loopback_dst_unlocked(
+                v4l2loopback_ctl, idx, expected_key=node_key
+            )
         if node_key == physical_key:
             reuse_dst_video_index = keeper_idx
 
@@ -377,7 +406,9 @@ def _reconcile_dst_video_index(v4l2loopback_ctl: str, *, physical_key: str) -> i
         state = _loopback_state(node_key, connected_keys, _video_node_busy(node))
         if state != "orphan-idle":
             continue
-        _delete_tc001_loopback_dst_unlocked(v4l2loopback_ctl, idx, expected_key=node_key)
+        _delete_tc001_loopback_dst_unlocked(
+            v4l2loopback_ctl, idx, expected_key=node_key
+        )
 
     if reuse_dst_video_index is not None:
         reuse_node = f"/dev/video{reuse_dst_video_index}"
@@ -405,7 +436,8 @@ def _launch_runtime_instance(src_video_index: int) -> int:
         ids = _video_usb_vid_pid(src)
         got = f"{ids[0]:04x}:{ids[1]:04x}" if ids else "unknown"
         raise RuntimeError(
-            f"--src-video-index {src_video_index} (/dev/video{src_video_index}) is not a TC001 camera "
+            f"--src-video-index {src_video_index} "
+            f"(/dev/video{src_video_index}) is not a TC001 camera "
             f"(expected 0bda:5830, got {got})"
         )
 
@@ -423,7 +455,9 @@ def _launch_runtime_instance(src_video_index: int) -> int:
     dst_video_index = -1
     try:
         if configured_dst_video_index is None:
-            dst_video_index = _reconcile_dst_video_index(v4l2loopback_ctl, physical_key=physical_key)
+            dst_video_index = _reconcile_dst_video_index(
+                v4l2loopback_ctl, physical_key=physical_key
+            )
         else:
             dst_video_index = _ensure_dst_video_index(
                 v4l2loopback_ctl,
@@ -436,10 +470,8 @@ def _launch_runtime_instance(src_video_index: int) -> int:
                 keep_dst_video_index=dst_video_index,
             )
     finally:
-        try:
+        with contextlib.suppress(Exception):
             os.close(v4l2_lock_fd)
-        except Exception:
-            pass
 
     dropin_path = ""
     try:
@@ -462,8 +494,9 @@ def _launch_runtime_instance(src_video_index: int) -> int:
         raise
 
     print(
-        f"Launch: {unit_name} src-index={src_video_index} (/dev/video{src_video_index}) "
-        f"dst-index={dst_video_index} (/dev/video{dst_video_index}) key={physical_key}",
+        f"Launch: {unit_name} src-index={src_video_index} "
+        f"(/dev/video{src_video_index}) dst-index={dst_video_index} "
+        f"(/dev/video{dst_video_index}) key={physical_key}",
         file=sys.stderr,
     )
     print(f"Drop-in: {dropin_path}", file=sys.stderr)
@@ -491,24 +524,30 @@ def _cleanup_runtime_instance(src_video_index: int) -> int:
                     ),
                     file=sys.stderr,
                 )
-            elif _delete_tc001_loopback_dst_unlocked(v4l2loopback_ctl, dst_video_index, expected_key=node_key):
+            elif _delete_tc001_loopback_dst_unlocked(
+                v4l2loopback_ctl, dst_video_index, expected_key=node_key
+            ):
                 print(
-                    f"Cleanup: removed TC001 loopback dst-index={dst_video_index} ({dst})",
+                    "Cleanup: removed TC001 loopback "
+                    f"dst-index={dst_video_index} ({dst})",
                     file=sys.stderr,
                 )
             else:
                 print(
-                    f"Cleanup: preserving {dst} because it is not a matching removable TC001 loopback node",
+                    f"Cleanup: preserving {dst} because it is not a "
+                    "matching removable TC001 loopback node",
                     file=sys.stderr,
                 )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 os.close(v4l2_lock_fd)
-            except Exception:
-                pass
     if _remove_runtime_dropin(src_video_index):
         _run([systemctl, "daemon-reload"], check=False)
-        print(f"Cleanup: removed runtime drop-in for tc001-color-camera@{src_video_index}.service", file=sys.stderr)
+        print(
+            "Cleanup: removed runtime drop-in for "
+            f"tc001-color-camera@{src_video_index}.service",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -521,12 +560,17 @@ def main(argv: Sequence[str]) -> int:
     )
     mode.add_argument(
         "--cleanup-src-video-index",
-        help="Cleanup source instance by index: stop runtime service, remove mapped TC001 loopback node, and remove drop-in",
+        help=(
+            "Cleanup source instance by index: stop runtime service, remove "
+            "mapped TC001 loopback node, and remove drop-in"
+        ),
     )
     args = parser.parse_args(list(argv))
     _require_root()
     if args.src_video_index is not None:
-        src_video_index = _parse_nonnegative_int(str(args.src_video_index), "--src-video-index")
+        src_video_index = _parse_nonnegative_int(
+            str(args.src_video_index), "--src-video-index"
+        )
         return _launch_runtime_instance(src_video_index)
 
     cleanup_src_video_index = _parse_nonnegative_int(

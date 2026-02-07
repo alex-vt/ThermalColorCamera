@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
+import contextlib
 import importlib.util
 import os
 import sys
 
 
 def _load_common_module():
-    common_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tc001-color-camera-common.py")
-    spec = importlib.util.spec_from_file_location("tc001_color_camera_common", common_path)
+    common_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "tc001-color-camera-common.py",
+    )
+    spec = importlib.util.spec_from_file_location(
+        "tc001_color_camera_common", common_path
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Failed to load common module from {common_path}")
     module = importlib.util.module_from_spec(spec)
@@ -47,7 +53,9 @@ def main() -> int:
                 if _common._video_node_busy(node):
                     preserved += 1
                     continue
-                if _common._delete_tc001_loopback_dst_unlocked(v4l2loopback_ctl, idx, expected_key=node_key):
+                if _common._delete_tc001_loopback_dst_unlocked(
+                    v4l2loopback_ctl, idx, expected_key=node_key
+                ):
                     removed += 1
                 else:
                     preserved += 1
@@ -58,17 +66,20 @@ def main() -> int:
             if _common._video_node_busy(keeper_node):
                 preserved += 1
                 continue
-            if _common._delete_tc001_loopback_dst_unlocked(v4l2loopback_ctl, keeper_idx, expected_key=node_key):
+            if _common._delete_tc001_loopback_dst_unlocked(
+                v4l2loopback_ctl, keeper_idx, expected_key=node_key
+            ):
                 removed += 1
             else:
                 preserved += 1
 
-        print(f"Cleanup complete: removed={removed} preserved={preserved}", file=sys.stderr)
+        print(
+            f"Cleanup complete: removed={removed} preserved={preserved}",
+            file=sys.stderr,
+        )
     finally:
-        try:
+        with contextlib.suppress(Exception):
             os.close(lock_fd)
-        except Exception:
-            pass
     return 0
 
 

@@ -3,17 +3,23 @@ import fcntl
 import hashlib
 import os
 import re
-import subprocess
+import subprocess  # nosec B404: required; calls use argv lists without shell
 import time
 from typing import List, Optional, Sequence, Tuple
-
 
 _TC001_LOOPBACK_NAME = "TC001 Color Camera"
 _TC001_LOOPBACK_KEY_RE = re.compile(r"^TC001 Color Camera \[([0-9a-f]{10})\]$")
 
 
 def _which(cmd: str) -> str:
-    trusted_dirs = ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin")
+    trusted_dirs = (
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    )
     for path_dir in trusted_dirs:
         candidate = os.path.join(path_dir, cmd)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -22,7 +28,9 @@ def _which(cmd: str) -> str:
 
 
 def _run(cmd: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, stdin=subprocess.DEVNULL)
+    return subprocess.run(  # nosec B603: trusted executable/arg vectors only
+        cmd, check=check, stdin=subprocess.DEVNULL
+    )
 
 
 def _read_text(path: str) -> str:
@@ -39,7 +47,9 @@ def _parse_nonnegative_int(raw: str, flag_name: str) -> int:
 
 def _require_root() -> None:
     if os.geteuid() != 0:
-        raise PermissionError("Must run as root (needs access to device nodes and /run lock files).")
+        raise PermissionError(
+            "Must run as root (needs access to device nodes and /run lock " "files)."
+        )
 
 
 def _sysfs_video_dir(video_node: str) -> str:
@@ -50,7 +60,10 @@ def _sysfs_video_dir(video_node: str) -> str:
 def _sysfs_find_up(start_dir: str, filenames: Sequence[str]) -> Optional[str]:
     current_dir = start_dir
     while current_dir.startswith("/sys/") and current_dir != "/sys":
-        if all(os.path.exists(os.path.join(current_dir, filename)) for filename in filenames):
+        if all(
+            os.path.exists(os.path.join(current_dir, filename))
+            for filename in filenames
+        ):
             return current_dir
         current_dir = os.path.dirname(current_dir)
     return None
@@ -118,7 +131,10 @@ def _tc001_usb_identity(video_node: str) -> str:
 
 def _tc001_identity_key(video_node: str) -> str:
     identity = _tc001_usb_identity(video_node)
-    return hashlib.sha1(identity.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(  # nosec B303: non-cryptographic stable key derivation
+        identity.encode("utf-8")
+    ).hexdigest()
+    return digest[:10]
 
 
 def _tc001_loopback_name_for_key(key: str) -> str:
@@ -190,10 +206,15 @@ def _list_tc001_loopback_nodes() -> List[Tuple[int, str, Optional[str]]]:
         if not suffix.isdigit():
             continue
         class_dir = os.path.join(base, entry)
+        name: Optional[str] = None
+        dev_real: Optional[str] = None
         try:
             name = _read_text(os.path.join(class_dir, "name"))
             dev_real = os.path.realpath(os.path.join(class_dir, "device"))
         except Exception:
+            name = None
+            dev_real = None
+        if name is None or dev_real is None:
             continue
         is_tc001_name, node_key = _parse_tc001_loopback_name(name)
         if not is_tc001_name:
@@ -210,10 +231,14 @@ def _connected_tc001_identity_keys() -> set[str]:
     for node in _list_video_nodes():
         if not _is_tc001(node):
             continue
+        node_key: Optional[str] = None
         try:
-            keys.add(_tc001_identity_key(node))
+            node_key = _tc001_identity_key(node)
         except Exception:
+            node_key = None
+        if node_key is None:
             continue
+        keys.add(node_key)
     return keys
 
 
@@ -235,14 +260,16 @@ def _video_node_busy(video_node: str) -> bool:
         try:
             fds = os.listdir(fd_dir)
         except Exception:
-            continue
+            fds = []
         for fd_name in fds:
             fd_path = os.path.join(fd_dir, fd_name)
+            same_target = False
             try:
-                if os.path.realpath(fd_path) == target:
-                    return True
+                same_target = os.path.realpath(fd_path) == target
             except Exception:
-                continue
+                same_target = False
+            if same_target:
+                return True
     return False
 
 
@@ -262,7 +289,9 @@ def _tc001_loopback_node_key(video_node: str) -> Optional[str]:
     return node_key
 
 
-def _is_tc001_loopback_node(video_node: str, *, expected_key: Optional[str] = None) -> bool:
+def _is_tc001_loopback_node(
+    video_node: str, *, expected_key: Optional[str] = None
+) -> bool:
     node_key = _tc001_loopback_node_key(video_node)
     if node_key is None:
         return False

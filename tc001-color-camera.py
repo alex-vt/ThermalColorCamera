@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import ctypes
 import ctypes.util
 import errno
@@ -9,13 +10,12 @@ import os
 import re
 import select
 import signal
-import subprocess
+import subprocess  # nosec B404: required; calls use argv lists without shell
 import sys
-import time
 import threading
+import time
 from array import array
 from typing import Iterable, List, Optional, Sequence, Tuple
-
 
 _THERMAL_SHM_DIR = "/dev/shm/sensors/camera/thermal"
 _THERMAL_SHM_FILES = {
@@ -61,10 +61,16 @@ def _median_from_sorted(values: Sequence[int]) -> float:
     return float(values[n // 2])
 
 
-def _thermal_stats_k64(thermal_u16: memoryview, width: int, height: int) -> Tuple[Tuple[float, float, float], dict[int, Tuple[float, float, float]]]:
+def _thermal_stats_k64(
+    thermal_u16: memoryview, width: int, height: int
+) -> Tuple[Tuple[float, float, float], dict[int, Tuple[float, float, float]]]:
     temps_k = list(thermal_u16)
     temps_k.sort()
-    overall = (float(temps_k[0]), float(temps_k[-1]), _median_from_sorted(temps_k))
+    overall = (
+        float(temps_k[0]),
+        float(temps_k[-1]),
+        _median_from_sorted(temps_k),
+    )
 
     x0, x1, x2, x3 = _split_3_bounds(width)
     y0, y1, y2, y3 = _split_3_bounds(height)
@@ -86,7 +92,11 @@ def _thermal_stats_k64(thermal_u16: memoryview, width: int, height: int) -> Tupl
             i1 = (y * width) + xe
             zone_vals.extend(thermal_u16[i0:i1])
         zone_vals.sort()
-        zones[zone_id] = (float(zone_vals[0]), float(zone_vals[-1]), _median_from_sorted(zone_vals))
+        zones[zone_id] = (
+            float(zone_vals[0]),
+            float(zone_vals[-1]),
+            _median_from_sorted(zone_vals),
+        )
 
     return overall, zones
 
@@ -101,7 +111,9 @@ def _rotated_dimensions(width: int, height: int, rotate: str) -> Tuple[int, int]
     raise ValueError(f"rotate must be one of 0/90/180/270, got {rotate}")
 
 
-def _center_crop_bounds(in_w: int, in_h: int, out_w: int, out_h: int) -> Tuple[int, int, int, int]:
+def _center_crop_bounds(
+    in_w: int, in_h: int, out_w: int, out_h: int
+) -> Tuple[int, int, int, int]:
     if in_w <= 0 or in_h <= 0:
         raise ValueError("in_w and in_h must be > 0")
     if out_w <= 0 or out_h <= 0:
@@ -136,11 +148,11 @@ def _thermal_stats_k64_visible(
     out_w: int,
     out_h: int,
 ) -> Tuple[Tuple[float, float, float], dict[int, Tuple[float, float, float]]]:
-    # Computing stats on the portion of the thermal image visible in the output video.
+    # Compute stats only on the thermal portion visible in the output video.
     rot_w, rot_h = _rotated_dimensions(width, height, rotate)
     crop_x, crop_y, crop_w, crop_h = _center_crop_bounds(rot_w, rot_h, out_w, out_h)
 
-    # Build a contiguous u16 buffer in the same orientation/crop as the output video.
+    # Build a contiguous u16 buffer in the same orientation/crop as output.
     visible = array("H")
     for yr in range(crop_y, crop_y + crop_h):
         for xr in range(crop_x, crop_x + crop_w):
@@ -165,7 +177,14 @@ def _thermal_stats_k64_visible(
 
 
 def _which(cmd: str) -> str:
-    trusted_dirs = ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin")
+    trusted_dirs = (
+        "/usr/local/sbin",
+        "/usr/local/bin",
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+    )
     for path_dir in trusted_dirs:
         candidate = os.path.join(path_dir, cmd)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -228,20 +247,30 @@ def _parse_ffc_disable_after(raw: Optional[str]) -> Optional[float]:
     try:
         delay = float(text)
     except ValueError as exc:
-        raise ValueError("--ffc-disable-after must be a number of seconds, 'none', or passed without a value") from exc
+        raise ValueError(
+            "--ffc-disable-after must be a number of seconds, 'none', "
+            "or passed without a value"
+        ) from exc
     if delay < 0:
-        print(f"--ffc-disable-after clamped to 0 (requested {delay})", file=sys.stderr)
+        print(
+            f"--ffc-disable-after clamped to 0 (requested {delay})",
+            file=sys.stderr,
+        )
         delay = 0.0
     return delay
 
 
 def _require_root() -> None:
     if os.geteuid() != 0:
-        raise PermissionError("Must run as root (needs access to device nodes and /run lock files).")
+        raise PermissionError(
+            "Must run as root (needs access to device nodes and /run lock " "files)."
+        )
 
 
 def _run(cmd: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, check=check, stdin=subprocess.DEVNULL)
+    return subprocess.run(  # nosec B603: trusted executable/arg vectors only
+        cmd, check=check, stdin=subprocess.DEVNULL
+    )
 
 
 def _read_text(path: str) -> str:
@@ -262,7 +291,11 @@ def _thermal_stats_paths() -> List[str]:
 
 
 def _ensure_thermal_stats_dir() -> None:
-    for directory in ("/dev/shm/sensors", "/dev/shm/sensors/camera", _THERMAL_SHM_DIR):
+    for directory in (
+        "/dev/shm/sensors",
+        "/dev/shm/sensors/camera",
+        _THERMAL_SHM_DIR,
+    ):
         os.makedirs(directory, mode=0o755, exist_ok=True)
 
 
@@ -294,9 +327,15 @@ def _write_thermal_stats(
             if stats is None:
                 continue
             zone_min_c, zone_max_c, zone_median_c = stats
-            _write_thermal_text_file(_thermal_zone_file(zone_id, "min"), f"{zone_min_c:.1f}\n")
-            _write_thermal_text_file(_thermal_zone_file(zone_id, "max"), f"{zone_max_c:.1f}\n")
-            _write_thermal_text_file(_thermal_zone_file(zone_id, "median"), f"{zone_median_c:.1f}\n")
+            _write_thermal_text_file(
+                _thermal_zone_file(zone_id, "min"), f"{zone_min_c:.1f}\n"
+            )
+            _write_thermal_text_file(
+                _thermal_zone_file(zone_id, "max"), f"{zone_max_c:.1f}\n"
+            )
+            _write_thermal_text_file(
+                _thermal_zone_file(zone_id, "median"), f"{zone_median_c:.1f}\n"
+            )
 
 
 def _update_thermal_stats_from_frame(
@@ -310,7 +349,9 @@ def _update_thermal_stats_from_frame(
     out_h: int,
 ) -> None:
     thermal_u16 = memoryview(frame_buf)[picture_bytes:].cast("H")
-    overall_k, zones_k = _thermal_stats_k64_visible(thermal_u16, width, height, rotate=rotate, out_w=out_w, out_h=out_h)
+    overall_k, zones_k = _thermal_stats_k64_visible(
+        thermal_u16, width, height, rotate=rotate, out_w=out_w, out_h=out_h
+    )
     zones_c = {
         zone_id: (
             _kelvin64_to_celsius(zone_stats_k[0]),
@@ -339,7 +380,9 @@ def _try_thermal_telemetry(operation, *args, **kwargs) -> None:
         print(f"Thermal telemetry disabled: {exc}", file=sys.stderr)
 
 
-def _build_palette_lut(points: Sequence[Tuple[float, Tuple[int, int, int]]]) -> List[bytes]:
+def _build_palette_lut(
+    points: Sequence[Tuple[float, Tuple[int, int, int]]]
+) -> List[bytes]:
     if not points or points[0][0] != 0.0 or points[-1][0] != 1.0:
         raise ValueError("palette must start at 0.0 and end at 1.0")
 
@@ -374,7 +417,9 @@ def _colorize_gray_frame(frame: bytes, lut: Sequence[bytes]) -> bytes:
     for p in frame:
         idx = (p - lo) * 255 // span
         rgb = lut[idx]
-        out[oi : oi + 3] = rgb
+        out[oi] = rgb[0]
+        out[oi + 1] = rgb[1]
+        out[oi + 2] = rgb[2]
         oi += 3
     return bytes(out)
 
@@ -458,7 +503,10 @@ def _sysfs_video_dir(video_node: str) -> str:
 def _sysfs_find_up(start_dir: str, filenames: Sequence[str]) -> Optional[str]:
     current_dir = start_dir
     while current_dir.startswith("/sys/") and current_dir != "/sys":
-        if all(os.path.exists(os.path.join(current_dir, filename)) for filename in filenames):
+        if all(
+            os.path.exists(os.path.join(current_dir, filename))
+            for filename in filenames
+        ):
             return current_dir
         current_dir = os.path.dirname(current_dir)
     return None
@@ -526,7 +574,10 @@ def _tc001_usb_identity(video_node: str) -> str:
 
 def _tc001_identity_key(video_node: str) -> str:
     identity = _tc001_usb_identity(video_node)
-    return hashlib.sha1(identity.encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(  # nosec B303: non-cryptographic stable key derivation
+        identity.encode("utf-8")
+    ).hexdigest()
+    return digest[:10]
 
 
 def _tc001_loopback_name_for_key(key: str) -> str:
@@ -547,7 +598,9 @@ def _parse_dst_name_key(raw: str) -> str:
     return key
 
 
-def _is_tc001_loopback_node(video_node: str, *, expected_key: Optional[str] = None) -> bool:
+def _is_tc001_loopback_node(
+    video_node: str, *, expected_key: Optional[str] = None
+) -> bool:
     video_basename = os.path.basename(video_node)
     class_dir = f"/sys/class/video4linux/{video_basename}"
     try:
@@ -590,11 +643,13 @@ def _find_tc001_video(prefer: str = "/dev/video0") -> str:
     for node in candidates:
         video_basename = os.path.basename(node)
         idx_path = f"/sys/class/video4linux/{video_basename}/index"
+        index_value: Optional[str] = None
         try:
-            if _read_text(idx_path) == "0":
-                return node
+            index_value = _read_text(idx_path)
         except Exception:
-            continue
+            index_value = None
+        if index_value == "0":
+            return node
     return candidates[0]
 
 
@@ -606,10 +661,14 @@ def _wait_for_tc001_device_nodes(video_node: str, timeout_s: float = 1.0) -> Non
         for node in nodes:
             video_basename = os.path.basename(node)
             idx_path = f"/sys/class/video4linux/{video_basename}/index"
+            index_value: Optional[str] = None
             try:
-                indices.add(_read_text(idx_path))
+                index_value = _read_text(idx_path)
             except Exception:
+                index_value = None
+            if index_value is None:
                 continue
+            indices.add(index_value)
         if "0" in indices and "1" in indices:
             return
         time.sleep(0.05)
@@ -626,7 +685,9 @@ def _acquire_single_instance_lock(video_node: str) -> Tuple[int, str]:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
         if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
-            raise RuntimeError(f"Already running for this TC001 camera (lock: {lock_path}).") from exc
+            raise RuntimeError(
+                f"Already running for this TC001 camera (lock: {lock_path})."
+            ) from exc
         raise
     os.ftruncate(fd, 0)
     os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
@@ -656,7 +717,17 @@ def _create_loopback_device(
     timeout_s: float = 2.5,
 ) -> str:
     dst = f"/dev/video{dst_video_index}"
-    _run([v4l2loopback_ctl, "add", "--name", loopback_name, "--exclusive-caps", "1", str(dst_video_index)])
+    _run(
+        [
+            v4l2loopback_ctl,
+            "add",
+            "--name",
+            loopback_name,
+            "--exclusive-caps",
+            "1",
+            str(dst_video_index),
+        ]
+    )
 
     deadline = time.monotonic() + timeout_s
     seen_path = False
@@ -670,7 +741,8 @@ def _create_loopback_device(
     _run([v4l2loopback_ctl, "delete", str(dst_video_index)], check=False)
     if seen_path:
         raise RuntimeError(
-            f"Created destination --dst-video-index {dst_video_index} ({dst}) is not a TC001 loopback node"
+            f"Created destination --dst-video-index {dst_video_index} ({dst}) "
+            "is not a TC001 loopback node"
         )
     raise FileNotFoundError(dst)
 
@@ -700,6 +772,7 @@ def _read_exact_with_timeout(stream, frame_size: int, timeout_s: float) -> bytes
 
 # ---- TC001 FFC disable (auto-shutter off) via USBDEVFS_CONTROL ioctl ----
 
+
 class _UsbdevfsCtrlTransfer(ctypes.Structure):
     _fields_ = [
         ("bRequestType", ctypes.c_ubyte),
@@ -716,7 +789,6 @@ def _usbdevfs_ioctl_iowr(size: int) -> int:
     IOC_NRBITS = 8
     IOC_TYPEBITS = 8
     IOC_SIZEBITS = 14
-    IOC_DIRBITS = 2
     IOC_NRSHIFT = 0
     IOC_TYPESHIFT = IOC_NRSHIFT + IOC_NRBITS
     IOC_SIZESHIFT = IOC_TYPESHIFT + IOC_TYPEBITS
@@ -726,7 +798,11 @@ def _usbdevfs_ioctl_iowr(size: int) -> int:
     direction = IOC_READ | IOC_WRITE
     ioc_type = ord("U")
     nr = 0
-    return (direction << IOC_DIRSHIFT) | (ioc_type << IOC_TYPESHIFT) | (nr << IOC_NRSHIFT) | (size << IOC_SIZESHIFT)
+    req = direction << IOC_DIRSHIFT
+    req |= ioc_type << IOC_TYPESHIFT
+    req |= nr << IOC_NRSHIFT
+    req |= size << IOC_SIZESHIFT
+    return req
 
 
 def _usbdevfs_control(fd: int, transfer: _UsbdevfsCtrlTransfer) -> None:
@@ -739,7 +815,14 @@ def _usbdevfs_control(fd: int, transfer: _UsbdevfsCtrlTransfer) -> None:
         raise OSError(err, os.strerror(err))
 
 
-def _ctrl_out(fd: int, request_type: int, request: int, value: int, index: int, data: bytes) -> None:
+def _ctrl_out(
+    fd: int,
+    request_type: int,
+    request: int,
+    value: int,
+    index: int,
+    data: bytes,
+) -> None:
     buf = ctypes.create_string_buffer(data)
     transfer = _UsbdevfsCtrlTransfer(
         bRequestType=request_type,
@@ -753,7 +836,14 @@ def _ctrl_out(fd: int, request_type: int, request: int, value: int, index: int, 
     _usbdevfs_control(fd, transfer)
 
 
-def _ctrl_in(fd: int, request_type: int, request: int, value: int, index: int, length: int) -> bytes:
+def _ctrl_in(
+    fd: int,
+    request_type: int,
+    request: int,
+    value: int,
+    index: int,
+    length: int,
+) -> bytes:
     buf = ctypes.create_string_buffer(length)
     transfer = _UsbdevfsCtrlTransfer(
         bRequestType=request_type,
@@ -778,11 +868,32 @@ def _tc001_set_auto_shutter(video_node: str, *, enabled: bool) -> None:
 
     fd = os.open(bus_file, os.O_RDWR)
     try:
-        _ctrl_out(fd, request_type=0x41, request=0x45, value=0x0078, index=0x9D00, data=payload1)
-        _ctrl_out(fd, request_type=0x41, request=0x45, value=0x0078, index=0x1D08, data=payload2)
+        _ctrl_out(
+            fd,
+            request_type=0x41,
+            request=0x45,
+            value=0x0078,
+            index=0x9D00,
+            data=payload1,
+        )
+        _ctrl_out(
+            fd,
+            request_type=0x41,
+            request=0x45,
+            value=0x0078,
+            index=0x1D08,
+            data=payload2,
+        )
 
         time.sleep(0.05)
-        status = _ctrl_in(fd, request_type=0xC1, request=0x44, value=0x0078, index=0x0200, length=1)[0]
+        status = _ctrl_in(
+            fd,
+            request_type=0xC1,
+            request=0x44,
+            value=0x0078,
+            index=0x0200,
+            length=1,
+        )[0]
 
         if status & 0b11111100:
             raise RuntimeError(f"FFC command error status=0x{status:02x}")
@@ -791,41 +902,61 @@ def _tc001_set_auto_shutter(video_node: str, *, enabled: bool) -> None:
 
 
 def main(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(description="TC001 -> v4l2loopback color virtual camera")
+    parser = argparse.ArgumentParser(
+        description="TC001 -> v4l2loopback color virtual camera"
+    )
     parser.add_argument(
         "--src-video-index",
         default=None,
-        help="TC001 source video index (number only, e.g. 2). If omitted, auto-detects (prefers index 0 when available).",
+        help=(
+            "TC001 source video index (number only, e.g. 2). "
+            "If omitted, auto-detects (prefers index 0 when available)."
+        ),
     )
     parser.add_argument("--fps", type=int, default=30, help="Capture/output framerate")
     parser.add_argument(
         "--dst-resolution",
         default="640x480",
-        help="Output resolution WxH (aspect-preserving, center-cropped; default 640x480)",
+        help=(
+            "Output resolution WxH (aspect-preserving, center-cropped; "
+            "default 640x480)"
+        ),
     )
     parser.add_argument(
         "--rotate",
         choices=("none", "0", "90", "180", "270"),
         default="90",
-        help="Rotate output by 0/90/180/270 degrees (or 'none' for 0; default: 90)",
+        help=(
+            "Rotate output by 0/90/180/270 degrees " "(or 'none' for 0; default: 90)"
+        ),
     )
     parser.add_argument(
         "--ffc-disable-after",
         nargs="?",
         default="30",
         const="none",
-        help="Disable auto-shutter (FFC) after N seconds from start (default: 30). Use 'none' or no value to keep auto-shutter enabled.",
+        help=(
+            "Disable auto-shutter (FFC) after N seconds from start "
+            "(default: 30). Use 'none' or no value to keep it enabled."
+        ),
     )
     parser.add_argument(
         "--temps-every",
         type=float,
         default=1.0,
-        help="Write temperature_min/median/max and temperature_zone{1..9}_{min,median,max} (°C) files every N seconds (default: 1).",
+        help=(
+            "Write temperature_min/median/max and "
+            "temperature_zone{1..9}_{min,median,max} (°C) files every N "
+            "seconds (default: 1)."
+        ),
     )
     parser.add_argument(
         "--dst-video-index",
         default=None,
-        help="Force destination video index N (number only, e.g. 2). If omitted, uses lowest free index.",
+        help=(
+            "Force destination video index N (number only, e.g. 2). "
+            "If omitted, uses lowest free index."
+        ),
     )
     parser.add_argument("--dst-name-key", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--skip-modprobe", action="store_true", help=argparse.SUPPRESS)
@@ -846,17 +977,23 @@ def main(argv: Sequence[str]) -> int:
     src = _find_tc001_video("/dev/video0")
     requested_src_video_index: Optional[int] = None
     if args.src_video_index is not None:
-        requested_src_video_index = _parse_video_index(str(args.src_video_index), "--src-video-index")
+        requested_src_video_index = _parse_video_index(
+            str(args.src_video_index), "--src-video-index"
+        )
         src = f"/dev/video{requested_src_video_index}"
     if not _is_tc001(src):
         ids = _video_usb_vid_pid(src)
         got = f"{ids[0]:04x}:{ids[1]:04x}" if ids else "unknown"
         if requested_src_video_index is not None:
             raise RuntimeError(
-                f"--src-video-index {requested_src_video_index} (/dev/video{requested_src_video_index}) "
+                f"--src-video-index {requested_src_video_index} "
+                f"(/dev/video{requested_src_video_index}) "
                 f"is not a TC001 camera (expected 0bda:5830, got {got})"
             )
-        raise RuntimeError(f"Auto-detected source {src} is not a TC001 camera (expected 0bda:5830, got {got})")
+        raise RuntimeError(
+            f"Auto-detected source {src} is not a TC001 camera "
+            f"(expected 0bda:5830, got {got})"
+        )
 
     _lock_fd, _lock_path = _acquire_single_instance_lock(src)
     _try_thermal_telemetry(_clear_thermal_stats)
@@ -875,13 +1012,19 @@ def main(argv: Sequence[str]) -> int:
         dst_name_key = _parse_dst_name_key(str(args.dst_name_key))
     elif not args.dst_precreated:
         dst_name_key = _tc001_identity_key(src)
-    loopback_name = _TC001_LOOPBACK_NAME if dst_name_key is None else _tc001_loopback_name_for_key(dst_name_key)
+    loopback_name = (
+        _TC001_LOOPBACK_NAME
+        if dst_name_key is None
+        else _tc001_loopback_name_for_key(dst_name_key)
+    )
 
     dst_video_index = args.dst_video_index
     if dst_video_index is None:
         dst_video_index = _lowest_free_video_nr()
     else:
-        dst_video_index = _parse_nonnegative_int(str(dst_video_index), "--dst-video-index")
+        dst_video_index = _parse_nonnegative_int(
+            str(dst_video_index), "--dst-video-index"
+        )
     dst = f"/dev/video{dst_video_index}"
 
     if args.dst_precreated:
@@ -897,17 +1040,17 @@ def main(argv: Sequence[str]) -> int:
                     expected_key=dst_name_key,
                 )
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     os.close(v4l2_lock_fd)
-                except Exception:
-                    pass
         if not _is_tc001_loopback_node(dst, expected_key=dst_name_key):
             raise RuntimeError(
-                f"--dst-precreated expected a TC001 loopback node at --dst-video-index {dst_video_index} "
+                "--dst-precreated expected a TC001 loopback node at "
+                f"--dst-video-index {dst_video_index} "
                 f"({dst}), but found a different device"
             )
     else:
-        # Serialize destination index selection/device creation across all instances.
+        # Serialize destination index selection/device creation across
+        # all instances.
         v4l2_lock_fd, _v4l2_lock_path = _acquire_v4l2loopback_lock()
         try:
             _create_loopback_device(
@@ -917,10 +1060,8 @@ def main(argv: Sequence[str]) -> int:
                 expected_key=dst_name_key,
             )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 os.close(v4l2_lock_fd)
-            except Exception:
-                pass
 
     # False-color palette with black->blue->green->yellow->orange->white.
     lut = _build_palette_lut(
@@ -971,7 +1112,10 @@ def main(argv: Sequence[str]) -> int:
         vf_parts.append("transpose=clock,transpose=clock")
     elif args.rotate == "270":
         vf_parts.append("transpose=cclock")
-    vf_parts.append(f"scale=w={out_w}:h={out_h}:flags=bilinear:force_original_aspect_ratio=increase")
+    vf_parts.append(
+        f"scale=w={out_w}:h={out_h}:flags=bilinear:"
+        "force_original_aspect_ratio=increase"
+    )
     vf_parts.append(f"crop={out_w}:{out_h}")
     vf_parts.append("format=yuyv422")
 
@@ -1015,14 +1159,15 @@ def main(argv: Sequence[str]) -> int:
     first_buf = b""
     probe_errors: List[str] = []
     for candidate in _sysfs_sibling_devices(src):
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603: internal ffmpeg argv builder, no shell
             _reader_cmd(candidate),
             stdout=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
         try:
-            assert proc.stdout is not None
+            if proc.stdout is None:
+                raise RuntimeError("ffmpeg reader stdout pipe not available")
             probe = _read_exact_with_timeout(proc.stdout, frame_size, timeout_s=2.0)
             if len(probe) != frame_size:
                 raise RuntimeError("short read")
@@ -1032,22 +1177,23 @@ def main(argv: Sequence[str]) -> int:
             break
         except Exception as exc:
             probe_errors.append(f"{candidate}: {exc}")
-            try:
+            with contextlib.suppress(Exception):
                 proc.terminate()
-            except Exception:
-                pass
             try:
                 proc.wait(timeout=2)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     proc.kill()
-                except Exception:
-                    pass
 
     if reader is None:
         _run([v4l2loopback_ctl, "delete", str(dst_video_index)], check=False)
-        details = "; ".join(probe_errors) if probe_errors else "no sibling video nodes found"
-        raise RuntimeError(f"Failed to open TC001 camera stream on any sibling video node. Details: {details}")
+        details = (
+            "; ".join(probe_errors) if probe_errors else "no sibling video nodes found"
+        )
+        raise RuntimeError(
+            "Failed to open TC001 camera stream on any sibling video node. "
+            f"Details: {details}"
+        )
 
     ffc_stop = threading.Event()
 
@@ -1060,10 +1206,13 @@ def main(argv: Sequence[str]) -> int:
                 _tc001_set_auto_shutter(src, enabled=False)
                 print("FFC: auto-shutter disabled", file=sys.stderr)
             except Exception as exc:
-                print(f"FFC: failed to disable auto-shutter: {exc}", file=sys.stderr)
+                print(
+                    f"FFC: failed to disable auto-shutter: {exc}",
+                    file=sys.stderr,
+                )
 
     try:
-        writer = subprocess.Popen(
+        writer = subprocess.Popen(  # nosec B603: internal ffmpeg argv list, no shell
             writer_cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
@@ -1075,8 +1224,10 @@ def main(argv: Sequence[str]) -> int:
         ffc_thread = threading.Thread(target=_ffc_worker, name="tc001-ffc", daemon=True)
         ffc_thread.start()
 
-        assert reader.stdout is not None
-        assert writer.stdin is not None
+        if reader.stdout is None:
+            raise RuntimeError("ffmpeg reader stdout pipe not available")
+        if writer.stdin is None:
+            raise RuntimeError("ffmpeg writer stdin pipe not available")
         frame_period = 1.0 / float(fps)
         now = time.monotonic()
         next_output_at = now
@@ -1087,7 +1238,10 @@ def main(argv: Sequence[str]) -> int:
                 try:
                     writer.stdin.write(_colorize_gray_frame(first_gray, lut))
                 except (BrokenPipeError, OSError) as exc:
-                    if not (stopping and isinstance(exc, OSError) and exc.errno == errno.EPIPE):
+                    is_epipe_while_stopping = False
+                    if stopping and isinstance(exc, OSError):
+                        is_epipe_while_stopping = exc.errno == errno.EPIPE
+                    if not is_epipe_while_stopping:
                         raise
                     stopping = True
                 now = time.monotonic()
@@ -1117,7 +1271,10 @@ def main(argv: Sequence[str]) -> int:
                 try:
                     writer.stdin.write(_colorize_gray_frame(gray, lut))
                 except (BrokenPipeError, OSError) as exc:
-                    if not (stopping and isinstance(exc, OSError) and exc.errno == errno.EPIPE):
+                    is_epipe_while_stopping = False
+                    if stopping and isinstance(exc, OSError):
+                        is_epipe_while_stopping = exc.errno == errno.EPIPE
+                    if not is_epipe_while_stopping:
                         raise
                     break
                 loop_now = time.monotonic()
@@ -1141,37 +1298,29 @@ def main(argv: Sequence[str]) -> int:
                 stream_failed = True
     finally:
         ffc_stop.set()
-        try:
-            if writer and writer.stdin:
+        if writer and writer.stdin:
+            with contextlib.suppress(Exception):
                 writer.stdin.close()
-        except Exception:
-            pass
         if stopping:
             for proc in (reader, writer):
                 if proc is None:
                     continue
-                try:
+                with contextlib.suppress(Exception):
                     proc.send_signal(signal.SIGINT)
-                except Exception:
-                    pass
         else:
             for proc in (reader, writer):
                 if proc is None:
                     continue
-                try:
+                with contextlib.suppress(Exception):
                     proc.terminate()
-                except Exception:
-                    pass
         for proc in (reader, writer):
             if proc is None:
                 continue
             try:
                 proc.wait(timeout=5)
             except Exception:
-                try:
+                with contextlib.suppress(Exception):
                     proc.kill()
-                except Exception:
-                    pass
         _run([v4l2loopback_ctl, "delete", str(dst_video_index)], check=False)
         _try_thermal_telemetry(_clear_thermal_stats)
 
