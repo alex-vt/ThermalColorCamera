@@ -3,6 +3,8 @@ import argparse
 import importlib.util
 import os
 import re
+import shlex
+import subprocess
 import sys
 import time
 from typing import List, Optional, Sequence, Tuple
@@ -131,6 +133,75 @@ def _create_loopback_device(
     raise FileNotFoundError(dst)
 
 
+def _last_execstart_from_unit_text(unit_text: str) -> Optional[str]:
+    in_service = False
+    exec_start_cmds: List[str] = []
+    for raw_line in unit_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_service = line.lower() == "[service]"
+            continue
+        if not in_service:
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if key.strip() != "ExecStart":
+            continue
+        value = value.strip()
+        if not value:
+            exec_start_cmds = []
+            continue
+        exec_start_cmds.append(value)
+    if not exec_start_cmds:
+        return None
+    return exec_start_cmds[-1]
+
+
+def _dst_video_index_from_execstart(exec_start: str) -> Optional[int]:
+    try:
+        tokens = shlex.split(exec_start)
+    except Exception:
+        return None
+
+    dst_video_index: Optional[int] = None
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--dst-video-index":
+            if i + 1 < len(tokens):
+                raw = tokens[i + 1].strip()
+                if raw.isdigit():
+                    dst_video_index = int(raw)
+            i += 2
+            continue
+        if token.startswith("--dst-video-index="):
+            raw = token.split("=", 1)[1].strip()
+            if raw.isdigit():
+                dst_video_index = int(raw)
+        i += 1
+    return dst_video_index
+
+
+def _configured_dst_video_index(systemctl: str, unit_name: str) -> Optional[int]:
+    proc = subprocess.run(
+        [systemctl, "cat", unit_name],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    exec_start = _last_execstart_from_unit_text(proc.stdout)
+    if exec_start is None:
+        return None
+    return _dst_video_index_from_execstart(exec_start)
+
+
 def _write_runtime_dropin(
     *,
     src_video_index: int,
@@ -170,6 +241,55 @@ def _write_runtime_dropin(
     with open(dropin_path, "w", encoding="utf-8") as file_handle:
         file_handle.write("\n".join(lines))
     return dropin_path
+
+
+def _ensure_dst_video_index(
+    v4l2loopback_ctl: str,
+    *,
+    physical_key: str,
+    dst_video_index: int,
+) -> int:
+    dst = f"/dev/video{dst_video_index}"
+    existing_key = _tc001_loopback_node_key(dst)
+    if existing_key is not None:
+        if existing_key != physical_key:
+            raise RuntimeError(
+                (
+                    f"--dst-video-index {dst_video_index} ({dst}) is already allocated to "
+                    f"a different TC001 camera (key={existing_key})"
+                )
+            )
+        return dst_video_index
+
+    if os.path.exists(dst):
+        raise RuntimeError(
+            (
+                f"--dst-video-index {dst_video_index} ({dst}) already exists and is not a "
+                "matching TC001 loopback node"
+            )
+        )
+
+    _create_loopback_device(
+        v4l2loopback_ctl,
+        dst_video_index,
+        loopback_name=_tc001_loopback_name_for_key(physical_key),
+        expected_key=physical_key,
+    )
+    return dst_video_index
+
+
+def _prune_duplicate_loopbacks_for_key(
+    v4l2loopback_ctl: str,
+    *,
+    physical_key: str,
+    keep_dst_video_index: int,
+) -> None:
+    for idx, node, node_key in _list_tc001_loopback_nodes():
+        if node_key != physical_key or idx == keep_dst_video_index:
+            continue
+        if _video_node_busy(node):
+            continue
+        _delete_tc001_loopback_dst_unlocked(v4l2loopback_ctl, idx, expected_key=physical_key)
 
 
 def _runtime_dropin_path(src_video_index: int) -> str:
@@ -278,6 +398,7 @@ def _launch_runtime_instance(src_video_index: int) -> int:
     systemctl = _which("systemctl")
     modprobe = _which("modprobe")
     v4l2loopback_ctl = _which("v4l2loopback-ctl")
+    unit_name = f"tc001-color-camera@{src_video_index}.service"
 
     src = f"/dev/video{src_video_index}"
     if not _is_tc001(src):
@@ -293,6 +414,7 @@ def _launch_runtime_instance(src_video_index: int) -> int:
     if src not in sibling_nodes:
         sibling_nodes.insert(0, src)
     physical_key = _tc001_identity_key(src)
+    configured_dst_video_index = _configured_dst_video_index(systemctl, unit_name)
 
     if not os.path.isdir("/sys/module/v4l2loopback"):
         _run([modprobe, "v4l2loopback", "devices=0"])
@@ -300,14 +422,25 @@ def _launch_runtime_instance(src_video_index: int) -> int:
     v4l2_lock_fd = _acquire_v4l2loopback_lock()
     dst_video_index = -1
     try:
-        dst_video_index = _reconcile_dst_video_index(v4l2loopback_ctl, physical_key=physical_key)
+        if configured_dst_video_index is None:
+            dst_video_index = _reconcile_dst_video_index(v4l2loopback_ctl, physical_key=physical_key)
+        else:
+            dst_video_index = _ensure_dst_video_index(
+                v4l2loopback_ctl,
+                physical_key=physical_key,
+                dst_video_index=configured_dst_video_index,
+            )
+            _prune_duplicate_loopbacks_for_key(
+                v4l2loopback_ctl,
+                physical_key=physical_key,
+                keep_dst_video_index=dst_video_index,
+            )
     finally:
         try:
             os.close(v4l2_lock_fd)
         except Exception:
             pass
 
-    unit_name = f"tc001-color-camera@{src_video_index}.service"
     dropin_path = ""
     try:
         bus, dev = _video_usb_bus_device_numbers(src)
