@@ -4,7 +4,9 @@ import ctypes
 import ctypes.util
 import errno
 import fcntl
+import hashlib
 import os
+import re
 import select
 import signal
 import subprocess
@@ -24,6 +26,8 @@ _THERMAL_SHM_FILES = {
 _THERMAL_SHM_ZONE_IDS = range(1, 10)
 _THERMAL_SHM_ZONE_KEYS = ("min", "median", "max")
 _THERMAL_TELEMETRY_DISABLED = False
+_TC001_LOOPBACK_NAME = "TC001 Color Camera"
+_TC001_LOOPBACK_KEY_RE = re.compile(r"^TC001 Color Camera \[([0-9a-f]{10})\]$")
 
 
 def _thermal_zone_file(zone_id: int, key: str) -> str:
@@ -492,7 +496,58 @@ def _is_tc001(video_node: str) -> bool:
     return ids == (0x0BDA, 0x5830)
 
 
-def _is_tc001_loopback_node(video_node: str) -> bool:
+def _tc001_usb_identity(video_node: str) -> str:
+    ids = _video_usb_vid_pid(video_node)
+    if ids is None:
+        raise RuntimeError(f"Unable to identify USB VID:PID for {video_node}")
+    vid, pid = ids
+    dev_dir = _sysfs_video_dir(video_node)
+    found = _sysfs_find_up(dev_dir, ("idVendor", "idProduct"))
+
+    serial = ""
+    path_key = ""
+    if found:
+        path_key = os.path.basename(found)
+        serial_path = os.path.join(found, "serial")
+        try:
+            if os.path.exists(serial_path):
+                serial = _read_text(serial_path)
+        except Exception:
+            serial = ""
+
+    if serial:
+        return f"vid={vid:04x};pid={pid:04x};serial={serial}"
+    if path_key:
+        return f"vid={vid:04x};pid={pid:04x};path={path_key}"
+
+    bus, dev = _video_usb_bus_device_numbers(video_node)
+    return f"vid={vid:04x};pid={pid:04x};bus={bus:03d};dev={dev:03d}"
+
+
+def _tc001_identity_key(video_node: str) -> str:
+    identity = _tc001_usb_identity(video_node)
+    return hashlib.sha1(identity.encode("utf-8")).hexdigest()[:10]
+
+
+def _tc001_loopback_name_for_key(key: str) -> str:
+    return f"{_TC001_LOOPBACK_NAME} [{key}]"
+
+
+def _parse_tc001_loopback_name(name: str) -> Tuple[bool, Optional[str]]:
+    match = _TC001_LOOPBACK_KEY_RE.fullmatch(name)
+    if not match:
+        return False, None
+    return True, match.group(1)
+
+
+def _parse_dst_name_key(raw: str) -> str:
+    key = raw.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{10}", key):
+        raise ValueError("--dst-name-key must be 10 lowercase hex characters")
+    return key
+
+
+def _is_tc001_loopback_node(video_node: str, *, expected_key: Optional[str] = None) -> bool:
     video_basename = os.path.basename(video_node)
     class_dir = f"/sys/class/video4linux/{video_basename}"
     try:
@@ -501,7 +556,10 @@ def _is_tc001_loopback_node(video_node: str) -> bool:
     except Exception:
         return False
 
-    if name != "TC001 Color Camera":
+    is_tc001_name, node_key = _parse_tc001_loopback_name(name)
+    if not is_tc001_name:
+        return False
+    if expected_key is not None and node_key != expected_key:
         return False
     return dev_real.startswith("/sys/devices/virtual/video4linux/")
 
@@ -589,16 +647,23 @@ def _acquire_v4l2loopback_lock() -> Tuple[int, str]:
     return fd, lock_path
 
 
-def _create_loopback_device(v4l2loopback_ctl: str, dst_video_index: int, *, timeout_s: float = 2.5) -> str:
+def _create_loopback_device(
+    v4l2loopback_ctl: str,
+    dst_video_index: int,
+    *,
+    loopback_name: str,
+    expected_key: Optional[str] = None,
+    timeout_s: float = 2.5,
+) -> str:
     dst = f"/dev/video{dst_video_index}"
-    _run([v4l2loopback_ctl, "add", "--name", "TC001 Color Camera", "--exclusive-caps", "1", str(dst_video_index)])
+    _run([v4l2loopback_ctl, "add", "--name", loopback_name, "--exclusive-caps", "1", str(dst_video_index)])
 
     deadline = time.monotonic() + timeout_s
     seen_path = False
     while time.monotonic() < deadline:
         if os.path.exists(dst):
             seen_path = True
-            if _is_tc001_loopback_node(dst):
+            if _is_tc001_loopback_node(dst, expected_key=expected_key):
                 return dst
         time.sleep(0.05)
 
@@ -762,6 +827,7 @@ def main(argv: Sequence[str]) -> int:
         default=None,
         help="Force destination video index N (number only, e.g. 2). If omitted, uses lowest free index.",
     )
+    parser.add_argument("--dst-name-key", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--skip-modprobe", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dst-precreated", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(list(argv))
@@ -804,6 +870,13 @@ def main(argv: Sequence[str]) -> int:
 
     _wait_for_tc001_device_nodes(src, timeout_s=1.0)
 
+    dst_name_key: Optional[str] = None
+    if args.dst_name_key is not None:
+        dst_name_key = _parse_dst_name_key(str(args.dst_name_key))
+    elif not args.dst_precreated:
+        dst_name_key = _tc001_identity_key(src)
+    loopback_name = _TC001_LOOPBACK_NAME if dst_name_key is None else _tc001_loopback_name_for_key(dst_name_key)
+
     dst_video_index = args.dst_video_index
     if dst_video_index is None:
         dst_video_index = _lowest_free_video_nr()
@@ -817,13 +890,18 @@ def main(argv: Sequence[str]) -> int:
             # pre-created node during cleanup.
             v4l2_lock_fd, _v4l2_lock_path = _acquire_v4l2loopback_lock()
             try:
-                _create_loopback_device(v4l2loopback_ctl, int(dst_video_index))
+                _create_loopback_device(
+                    v4l2loopback_ctl,
+                    int(dst_video_index),
+                    loopback_name=loopback_name,
+                    expected_key=dst_name_key,
+                )
             finally:
                 try:
                     os.close(v4l2_lock_fd)
                 except Exception:
                     pass
-        if not _is_tc001_loopback_node(dst):
+        if not _is_tc001_loopback_node(dst, expected_key=dst_name_key):
             raise RuntimeError(
                 f"--dst-precreated expected a TC001 loopback node at --dst-video-index {dst_video_index} "
                 f"({dst}), but found a different device"
@@ -832,7 +910,12 @@ def main(argv: Sequence[str]) -> int:
         # Serialize destination index selection/device creation across all instances.
         v4l2_lock_fd, _v4l2_lock_path = _acquire_v4l2loopback_lock()
         try:
-            _create_loopback_device(v4l2loopback_ctl, int(dst_video_index))
+            _create_loopback_device(
+                v4l2loopback_ctl,
+                int(dst_video_index),
+                loopback_name=loopback_name,
+                expected_key=dst_name_key,
+            )
         finally:
             try:
                 os.close(v4l2_lock_fd)

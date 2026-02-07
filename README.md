@@ -5,7 +5,7 @@ A script that converts the Topdon TC001 thermal camera (0bda:5830) raw gray/gree
 ## Features
 
 - Auto-detects TC001 by USB VID:PID (`0bda:5830`)
-- Creates a virtual camera named `TC001 Color Camera`
+- Creates a virtual camera named `TC001 Color Camera [<id>]` (ID key is 10 lowercase hex characters)
 - Converts thermal image to false color (`black -> blue -> green -> yellow -> orange -> white`)
 - Uses `udev -> systemd` hotplug flow via a short launcher unit (start on plug, stop on unplug) if installed
 - Writes thermal stats to `/dev/shm/sensors/camera/thermal/temperature_*`: `min`/`median`/`max` temperatures in deg C across the output image.
@@ -31,7 +31,7 @@ Run directly:
 sudo ./tc001-color-camera.py
 ```
 
-Then select `TC001 Color Camera` in your camera app.
+Then select the `TC001 Color Camera [<id>]` device in your camera app.
 
 ### Options
 
@@ -53,7 +53,7 @@ sudo ./tc001-color-camera.py --dst-resolution 1280x720 --fps 30
 sudo ./tc001-color-camera.py --ffc-disable-after none
 ```
 
-## Output
+### Temperature readings
 
 Written to `/dev/shm/sensors/camera/thermal/`:
 
@@ -72,7 +72,17 @@ Zone layout (`1/4, 1/2, 1/4` split in each direction; zone 5 is largest):
 
 Zone positions follow the cropped output orientation.
 
-Files are cleared on exit/unplug.
+### Cleanup
+
+The temperature readings files are cleared on exit/unplug.
+
+The virtual camera device is removed on exit/unplug as well, however, except the case if the virtual camera was in use at that moment: the Linux kernel doesn't allow removing such a device while in use. You can run a cleanup script for the unused virtual cameras if this happens:
+
+```bash
+sudo ./tc001-color-camera-cleanup.py
+```
+
+Or you can install the script as described below - then the "orphaned" unused virtual devices will be removed or reused every time a physical TC001 device is plugged in.
 
 ## Installation
 
@@ -86,6 +96,8 @@ Additional requirements:
 ```bash
 sudo install -m 0755 tc001-color-camera.py /usr/local/bin/tc001-color-camera
 sudo install -m 0755 tc001-color-camera-hotplug.py /usr/local/bin/tc001-color-camera-hotplug
+sudo install -m 0755 tc001-color-camera-cleanup.py /usr/local/bin/tc001-color-camera-cleanup
+sudo install -m 0755 tc001-color-camera-common.py /usr/local/bin/tc001-color-camera-common.py
 ```
 
 2. Install `udev` rule and `systemd` unit:
@@ -150,5 +162,5 @@ sudo systemctl daemon-reload
 Remove script:
 
 ```bash
-sudo rm -f /usr/local/bin/tc001-color-camera /usr/local/bin/tc001-color-camera-hotplug
+sudo rm -f /usr/local/bin/tc001-color-camera /usr/local/bin/tc001-color-camera-hotplug /usr/local/bin/tc001-color-camera-cleanup /usr/local/bin/tc001-color-camera-common.py
 ```
